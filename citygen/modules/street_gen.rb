@@ -1,6 +1,6 @@
 # street_gen.rb
 #---------------------------------------------------------------------------------------------------
-# Version: 0.5.0a
+# Version: 0.5.1a
 # Compatible: SketchUp 7 (PC)
 #             (other versions untested)
 #---------------------------------------------------------------------------------------------------
@@ -30,19 +30,22 @@
 #		 * Fixed a syntax error.
 #
 # 0.5.0a - 02.06.2009 (Thom)
-#		 * Varaible street width.
+#		 * Variable street width.
+#
+# 0.5.1a - 09.06.2009 (Thom)
+#		 * First draft to webdialog.
 #
 #---------------------------------------------------------------------------------------------------
 #
 # KNOWN ISSUES
-# * ...
+# * Multiple groups of unconnected segments might cause unexpected behaviour.
+# * Radius doesn't check if there's space.
 #
 #---------------------------------------------------------------------------------------------------
 #
 # TO-DO / NEXT
+# * Street type list/editor
 # * Toolbar.
-# * Default street properties.
-# * Custom street properties by edge material.
 # * Street modifier tool - Modify the street segments of existing streets.
 # * Error handling
 # * Length from corner, instead of radius?
@@ -77,7 +80,7 @@ module City_Gen
 		
 		### CONSTANTS ### --------------------------------------------------------------------------
 		unless file_loaded?('street_gen.rb')
-			VERSION = '0.5.0'
+			VERSION = '0.5.1'
 			MODULE_ID = 'Street_Gen'
 			GENERATOR_ID = MODULE_ID + '-' + VERSION
 		end
@@ -86,41 +89,62 @@ module City_Gen
 		unless file_loaded?('street_gen.rb')
 			# Commands
 			cmd_generate_streets = UI::Command.new('Generate Streets') {
-				City_Gen::Street_Gen.selection_streets_from_centre_lines
+				City_Gen::Street_Gen.wnd_param.show
 			}
 			
 			# Menus
 			City_Gen.menu.add_item(cmd_generate_streets)
-		end 
+		end
+		
+		### WEBDIALOGS ### -------------------------------------------------------------------------
+		@wnd_param = UI::WebDialog.new('Street Generator - Parameters', false, 'cg_sg_params', 500, 325, 100, 100, false)
+		@wnd_param.set_file(File.dirname(__FILE__) + '/street_gen/webdialog/parameters.html')
+		
+		# User Generates streets.
+		@wnd_param.add_action_callback('param_generate') { |dialog, params|
+			# Get the data from the Webdialog.
+			parameters = self.string_to_hash(params)
+			# Prepare the data
+			parameters['road_width']		= parameters['road_width'].to_l / 2
+			parameters['corner_radius']		= parameters['corner_radius'].to_l
+			parameters['min_round_angle']	= parameters['min_round_angle'].to_i.degrees
+			parameters['create_blocks']		= (parameters['create_blocks'] == 'true') ? true : false
+			# Process the streets.
+			self.selection_streets_from_centre_lines(parameters)
+			@wnd_param.close
+		}
+		# User Cancels the action.
+		@wnd_param.add_action_callback('param_cancel') { |dialog, params|
+			@wnd_param.close
+		}
+		# Accessor
+		def self.wnd_param
+			@wnd_param
+		end
 		
 		### METHODS ### ----------------------------------------------------------------------------
-		def self.selection_streets_from_centre_lines
+		
+		# Filters out all edges from the current selection and generates streets.
+		# > parameters - is an hash with street properties.
+		def self.selection_streets_from_centre_lines(parameters)
 			sel = Sketchup.active_model.selection.to_a
 			sel.reject! { |e| !e.kind_of?(Sketchup::Edge) }
-			self.streets_from_centre_lines(sel)
+			self.streets_from_centre_lines(sel, parameters)
 			# (!) Must also be able to select a group containing edges as that probably what the 
 			#     Street Map Generator will create.
 		end
 		
-		
-		def self.streets_from_centre_lines(edges)
+		# Generates street for the set of edges provided.
+		# > edges - an array of edges
+		# > parameters - a hash with street properties.
+		def self.streets_from_centre_lines(edges, parameters)
 			model = Sketchup.active_model
 			sel = model.selection
 			
-			# Prompt for street properties
-			# (!) This should be moved to a separate function that sets the default properties.
-			#     Then custom street width is set by using materials. For now this will do.
-			prompts = ['Width', 'Corner Radius', 'Min. Rounding Angle', 'Create Blocks']
-			defaults = [10000.mm.to_s, 3000.mm.to_s, 30.to_s, 'No']
-			lists = ['', '', '', 'Yes|No']
-			input = UI.inputbox(prompts, defaults, lists, 'Street Properties')
-			
-			return if input == false
-			
-			road_width		= input[0].to_l / 2
-			corner_radius	= input[1].to_l
-			minimum_round_angle = input[2].to_i.degrees
-			create_blocks	= (input[3] == 'Yes') ? true : false
+			road_width			= parameters['road_width']
+			corner_radius		= parameters['corner_radius']
+			minimum_round_angle = parameters['min_round_angle']
+			create_blocks		= parameters['create_blocks']
 			
 			
 			puts "\nGenerating Streets from #{edges.length} edges..."
@@ -495,41 +519,46 @@ module City_Gen
 		end
 		
 		
-		# Classes
+		# (?) Move this to core?
+		# Takes a string like "key1=value1,key2=value2" and creates an hash.
+		def self.string_to_hash(string)
+			hash = {}
+			datapairs = string.split(',')
+			datapairs.each { |datapair|
+				data = datapair.split('=')
+				hash[data[0]] = data[1]
+			}
+			return hash
+		end
+		
+		
+		### CLASSES ## -----------------------------------------------------------------------------
+		# Class that will take an Sketchup material and parse the street properties from the
+		# Material name.
 		class CG_Street
 			
 			attr_accessor(:name, :width)
 			
 			def initialize(material)
-				# (!) Raise error?
-				#puts 'init...'
-				return nil if not material.kind_of?(Sketchup::Material)
-				
+				# (?) Raise error?
+				return if not material.kind_of?(Sketchup::Material)
+				# The material name contains the street properties.
+				# Properties are separated by an underscore.
 				data = material.name.split('_')
-				#puts '> split'
-				#puts data.inspect
-				
-				if data.length >= 3 && data[0] == 'CG' && data[1] == 'Street'
-					@name = data[2]
-					
-					#puts '> set name'
-					
-					if data.length > 3
-						#puts '> arguments'
-						arguments = data[3, data.length]
-						#puts arguments.inspect
-						arguments.each { |a|
-							d = a.split(':')
-							
-							case d[0]
-								when 'W'
-									@width = d[1].to_l
-									#puts '> set width'
-							end
-						}
+				# The first two values must be 'CG' and 'Street'. This identifies the material
+				# as a street definition
+				return if data.shift != 'CG'
+				return if data.shift != 'Street'
+				# Then we have the name, which is a string variable
+				@name = data.shift
+				# The rest is optional arguments which may appear in any order.
+				data.each { |arg|
+					d = arg.split(':')
+					case d[0]
+						when 'W'
+							@width = d[1].to_l
 					end
-				end
-				#puts '> end'
+				}
 			end
 			
 		end
@@ -543,6 +572,7 @@ end # module City_Gen
 module Geom
 	class Vector3d
 		# Return the full orientation of the two lines. Going counter-clockwise.
+		# (!) Clean up and revise.
 		def tt_angle_between(vector)
 			# self.axes.y -> [0,0,1]
 			#puts "\nTT Angle Between"
